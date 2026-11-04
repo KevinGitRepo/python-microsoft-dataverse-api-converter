@@ -21,6 +21,8 @@ class Authentication:
         self.dataverse_api_url: str = os.getenv('MAIN_DATAVERSE_API_URL')
         # self.choice_column_value: str = os.getenv('CHOICE_VALUE')
         self.authenticate_session()
+        self.session = None
+        self.token_cache = None
 
     def load_token_cache_file(self) -> None:
         self.token_cache: SerializableTokenCache = msal.SerializableTokenCache()
@@ -33,7 +35,7 @@ class Authentication:
             if os.path.exists(self.token_cache_file):
                 self.token_cache.deserialize(open(self.token_cache_file, 'r').read())
 
-    def get_bearer_token(self) -> str:
+    def get_bearer_token(self):
         self.load_token_cache_file()
         authority_url = f'https://login.microsoftonline.com/{self.tenant_id}'
 
@@ -104,99 +106,31 @@ class Authentication:
 
         return r.status_code
     
-    def _get_request_url(self, tablename):
-        return f'{self.resource}{self.dataverse_api_url}{tablename}'
+    def _get_request_url(self, table_name):
+        return f'{self.resource}{self.dataverse_api_url}{table_name}'
 
-    def post_to_table_in_dataverse(self, tablename, json_parameters) -> requests.Response:
+    def post_to_table_in_dataverse(self, table_name, json_parameters) -> requests.Response:
 
         # Validate json (Maybe)
 
-        request_url = self._get_request_url(tablename)
+        request_url = self._get_request_url(table_name)
         response = self.session.post(request_url, json=json_parameters)
         return response
 
-    def get_table_from_dataverse(self, tablename, query_parameters=None) -> requests.Response | None:
+    def get_table_from_dataverse(self, table_name, query_parameters=None) -> requests.Response | None:
         # query_parameters is used for any filter or selection
-        query_functions = ''
-        
-        if query_parameters:
-            query_options = {'select': self._select_option, 'expand': self._expand_option, 'orderby': self._orderby_option, 
-                             'filter': self._filter_option, 'apply': self._apply_option, 'top': self._top_option, 'count': self._count_option}
-            query_keys = query_parameters.keys()
-            for key in query_keys:
-                if isinstance(key, str):
-                    key = key.lower()
-                if key not in query_options:
-                    return None # Logging here later (Maybe)
+        if not query_parameters:
+            query_parameters = ''
 
-                if query_functions == '':
-                    query_functions = f'?${key}={query_options[key](query_parameters[key])}'
-                else:
-                    query_functions = f'{query_functions}&${key}={query_options[key](query_parameters[key])}'
+        encoded_filter = urllib.parse.quote(query_parameters)
 
-        request_url = f'{self._get_request_url(tablename)}{query_functions}'
-        # print(request_url)
+        request_url = f'{self._get_request_url(table_name)}{encoded_filter}'
+
         return self._get_from_dataverse(request_url)
     
     def _get_from_dataverse(self, request_url) -> requests.Response:
         # print(request_url)
         return self.session.get(request_url)
-
-    def _select_option(self, *args) -> str:
-        return_string = ''
-        # args = (['column1', 'column2'],)
-        for item in args:
-            if isinstance(item, list):
-                for subitem in item:
-                    if return_string == '':
-                        return_string = str(subitem)
-                    else:
-                        return_string += f',{str(subitem)}'
-            else:
-                if return_string == '':
-                    return_string = str(item)
-                else:
-                    return_string += f',{str(item)}'
-        print(return_string)
-        return return_string
-
-    def _filter_option(self, *args) -> str:
-        # TODO
-
-        # Check for proper filter format
-
-        # args = ({'and': {'column1': 'value1', 'column2': 'value2'}},)
-        arg_item = args[0]
-        arg_item_key = list(arg_item.keys())[0]
-
-        # AND and OR option only, maybe add a NOT option later
-        # AND will be the default
-        if arg_item_key != 'not' and arg_item_key != 'or':
-            filter_type = 'and'
-        else:
-            filter_type = arg_item_key
-            
-        filter_conditions = []
-
-        for k, v in arg_item[arg_item_key].items():
-            if type(v) is not list:
-                filter_conditions.append(f"{k} eq {self._quote_only_strings(v)}")
-                continue
-
-            for value in v:
-                filter_conditions.append(f'{k} eq {self._quote_only_strings(value)}')
-
-
-        # filter_conditions = [f'{k} eq {self._quote_only_strings(v)}' for k, v in arg_item[arg_item_key].items()]
-        odata_filter = f' {filter_type} '.join(filter_conditions)
-        encoded_filter = urllib.parse.quote(odata_filter)
-
-        return encoded_filter
-
-    def _quote_only_strings(self, value) -> str:
-        if isinstance(value, str):
-            return f'{value}'
-        return str(value)
 
     def _expand_option(self, *args) -> str:
         # TODO
@@ -217,27 +151,25 @@ class Authentication:
         # TODO
         pass
 
-    def patch_row_in_dataverse(self, tablename, json_parameter, GUID) -> requests.Response:
-        # TODO
-        
-        # Validate json (Maybe)
+    def patch_row_in_dataverse(self, table_name, json_parameter, guid) -> requests.Response:
+        request_url = f'{self._get_request_url(table_name)}({guid})'
 
-        request_url = f'{self._get_request_url(tablename)}({GUID})'
-        # print(request_url, ' : ', json_parameter)
         return self.session.patch(request_url, json=json_parameter)
 
     def get_choice_from_dataverse(self, choice_name) -> requests.Response:
         request_url = f"{self._get_request_url('GlobalOptionSetDefinitions')}(Name='{choice_name}')"
+
         return self._get_from_dataverse(request_url)
 
-    def delete_row_in_dataverse(self, tablename, GUID) -> requests.Response:
-        request_url = f'{self._get_request_url(tablename)}({GUID})'
+    def delete_row_in_dataverse(self, table_name, guid) -> requests.Response:
+        request_url = f'{self._get_request_url(table_name)}({guid})'
+
         return self.session.delete(request_url)
 
-    def upload_file_to_dataverse(self, tablename, file_data, file_name, GUID, column_name) -> requests.Response:
+    def upload_file_to_dataverse(self, table_name, file_data, file_name, guid, column_name) -> requests.Response:
         r"""Uploads a file to the dataverse using PATCH request. Returns :class:`Response` object.
 
-        :param tablename: Name of the table in the Dataverse which will receive the file object.
+        :param table_name: Name of the table in the Dataverse which will receive the file object.
         :param file_data: Bytes, or file-like
             object to send in the body of the :class:`Request`.
         :param file_name: Name that will show in the Dataverse column when viewed.
@@ -259,7 +191,5 @@ class Authentication:
         }
 
         # Patch function so record already has to exist
-        upload_url = f"{self._get_request_url(tablename)}({GUID})/{column_name}"
+        upload_url = f"{self._get_request_url(table_name)}({guid})/{column_name}"
         return self.session.patch(upload_url, headers=headers, data=file_data)
-
-# Status code 401 session expired
